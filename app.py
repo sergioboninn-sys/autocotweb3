@@ -90,118 +90,120 @@ if aba == "📊 Cotação":
     discount = st.sidebar.number_input("Desconto (%)", 0.0)
     aplicar_arredondamento = st.sidebar.checkbox("Arredondar preços", value=True)
 
-    # AJUSTE: Aceita xlsx e xls
     target_file = st.file_uploader("Planilha de Destino", type=["xlsx", "xls"])
 
     if target_file:
-        # Se for XLS, o openpyxl não consegue preservar formatação.
-        # Avisamos o usuário que o arquivo será convertido para XLSX internamente.
-        is_xls = target_file.name.endswith('.xls')
+        is_xls = target_file.name.lower().endswith('.xls')
         
         c1, c2 = st.columns(2)
         header_pos = c1.number_input("Linha do Cabeçalho:", 1, 100, 10)
         start_row = c2.number_input("Linha de início dos produtos:", 1, 1000, 11)
 
-        # Leitura da visualização (Pandas lida com ambos)
-        t_df_view = pd.read_excel(target_file, header=header_pos-1)
-        
-        st.subheader("Mapeamento de Colunas")
-        col1, col2, col3 = st.columns(3)
-        desc_col = col1.selectbox("Coluna Descrição", t_df_view.columns)
-        bar_col = col2.selectbox("Coluna Barras", t_df_view.columns)
-        price_col = col3.selectbox("Coluna Preço", t_df_view.columns)
-
-        if st.button("🚀 Processar e Preservar Formatação"):
-            price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
-            target_file.seek(0)
-            
+        try:
+            # Forçamos o motor xlrd para arquivos .xls
             if is_xls:
-                # Conversão temporária para XLSX para manter o motor openpyxl funcionando
-                # Nota: Arquivos .xls originais perderão estilos complexos (macros/cores específicas) na conversão
-                temp_df = pd.read_excel(target_file, header=None)
-                output_tmp = io.BytesIO()
-                with pd.ExcelWriter(output_tmp, engine='openpyxl') as writer:
-                    temp_df.to_excel(writer, index=False, header=False)
-                output_tmp.seek(0)
-                wb = openpyxl.load_workbook(output_tmp)
+                t_df_view = pd.read_excel(target_file, header=header_pos-1, engine='xlrd')
             else:
-                wb = openpyxl.load_workbook(target_file)
+                t_df_view = pd.read_excel(target_file, header=header_pos-1)
+            
+            st.subheader("Mapeamento de Colunas")
+            col1, col2, col3 = st.columns(3)
+            desc_col = col1.selectbox("Coluna Descrição", t_df_view.columns)
+            bar_col = col2.selectbox("Coluna Barras", t_df_view.columns)
+            price_col = col3.selectbox("Coluna Preço", t_df_view.columns)
+
+            if st.button("🚀 Processar e Preservar Formatação"):
+                price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
+                target_file.seek(0)
                 
-            ws = wb.active
-            col_indices = {}
-            for col_idx in range(1, ws.max_column + 1):
-                val = ws.cell(row=header_pos, column=col_idx).value
-                if val: col_indices[str(val).strip()] = col_idx
+                if is_xls:
+                    # Converte XLS para XLSX em memória para o OpenPyXL conseguir trabalhar
+                    temp_df = pd.read_excel(target_file, header=None, engine='xlrd')
+                    output_tmp = io.BytesIO()
+                    with pd.ExcelWriter(output_tmp, engine='openpyxl') as writer:
+                        temp_df.to_excel(writer, index=False, header=False)
+                    output_tmp.seek(0)
+                    wb = openpyxl.load_workbook(output_tmp)
+                else:
+                    wb = openpyxl.load_workbook(target_file)
+                    
+                ws = wb.active
+                col_indices = {}
+                for col_idx in range(1, ws.max_column + 1):
+                    val = ws.cell(row=header_pos, column=col_idx).value
+                    if val: col_indices[str(val).strip()] = col_idx
 
-            try:
-                d_idx = col_indices[desc_col.strip()]
-                b_idx = col_indices[bar_col.strip()]
-                p_idx = col_indices[price_col.strip()]
-            except:
-                st.error("Erro ao mapear colunas. Verifique a linha do cabeçalho.")
-                st.stop()
+                try:
+                    d_idx = col_indices[desc_col.strip()]
+                    b_idx = col_indices[bar_col.strip()]
+                    p_idx = col_indices[price_col.strip()]
+                except:
+                    st.error("Erro ao mapear colunas. Verifique se os nomes das colunas na linha do cabeçalho estão corretos.")
+                    st.stop()
 
-            count = 0
-            for r in range(int(start_row), ws.max_row + 1):
-                d_val = ws.cell(row=r, column=d_idx).value
-                b_val = ws.cell(row=r, column=b_idx).value
-                if not d_val and not b_val: continue
-                found_p = None
-                if "Barras" in modo or "Híbrido" in modo:
-                    bcodes = extract_all_barcodes(b_val)
-                    for b in bcodes:
-                        if b in price_map:
-                            found_p = price_map[b]
-                            break
-                if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
-                    best_sim = 0
-                    d_detalhes = extrair_detalhes(d_val)
-                    for _, row_db in master_db.iterrows():
-                        sim_val = similarity(d_val, row_db['Description'])
-                        if sim_val >= 0.75 and d_detalhes == extrair_detalhes(row_db['Description']):
-                            if sim_val > best_sim:
-                                best_sim = sim_val
-                                found_p = row_db['Price']
+                count = 0
+                for r in range(int(start_row), ws.max_row + 1):
+                    d_val = ws.cell(row=r, column=d_idx).value
+                    b_val = ws.cell(row=r, column=b_idx).value
+                    if not d_val and not b_val: continue
+                    found_p = None
+                    if "Barras" in modo or "Híbrido" in modo:
+                        bcodes = extract_all_barcodes(b_val)
+                        for b in bcodes:
+                            if b in price_map:
+                                found_p = price_map[b]
+                                break
+                    if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
+                        best_sim = 0
+                        d_detalhes = extrair_detalhes(d_val)
+                        for _, row_db in master_db.iterrows():
+                            sim_val = similarity(d_val, row_db['Description'])
+                            if sim_val >= 0.75 and d_detalhes == extrair_detalhes(row_db['Description']):
+                                if sim_val > best_sim:
+                                    best_sim = sim_val
+                                    found_p = row_db['Price']
 
-                if found_p is not None:
-                    final_p = float(found_p) * (1 - (discount / 100))
-                    if aplicar_arredondamento:
-                        final_p = extra_round(final_p)
-                    ws.cell(row=r, column=p_idx).value = final_p
-                    count += 1
+                    if found_p is not None:
+                        final_p = float(found_p) * (1 - (discount / 100))
+                        if aplicar_arredondamento:
+                            final_p = extra_round(final_p)
+                        ws.cell(row=r, column=p_idx).value = final_p
+                        count += 1
 
-            output = io.BytesIO()
-            wb.save(output)
-            st.success(f"Sucesso! {count} itens preenchidos.")
-            # O download será sempre em .xlsx para garantir a integridade dos dados processados
-            st.download_button("📥 Baixar Planilha Pronta", output.getvalue(), "cotacao_final.xlsx")
+                output = io.BytesIO()
+                wb.save(output)
+                st.success(f"Sucesso! {count} itens preenchidos.")
+                st.download_button("📥 Baixar Planilha Pronta (XLSX)", output.getvalue(), "cotacao_final.xlsx")
+        except Exception as e:
+            st.error(f"Erro ao processar arquivo: {e}")
 
 # --- ABA 2: GERENCIAR BANCO ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco de Dados")
-    # AJUSTE: Aceita xlsx, xls e csv
     f = st.file_uploader("Upload Banco (Referência)", type=["xlsx", "xls", "csv"])
     if f and st.button("💾 Salvar e Atualizar Banco"):
-        if f.name.endswith('.csv'):
-            df = pd.read_csv(f)
-        else:
-            df = pd.read_excel(f) # Pandas usa xlrd automaticamente para .xls
-            
-        df = df.iloc[:, [0, 1, 2]]
-        df.columns = ['Description', 'Barcode', 'Price']
-        df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
-        df.to_csv(DB_STORAGE, index=False)
-        st.cache_data.clear()
-        st.success("Banco de dados atualizado com sucesso!")
+        try:
+            if f.name.lower().endswith('.csv'):
+                df = pd.read_csv(f)
+            elif f.name.lower().endswith('.xls'):
+                df = pd.read_excel(f, engine='xlrd')
+            else:
+                df = pd.read_excel(f)
+                
+            df = df.iloc[:, [0, 1, 2]]
+            df.columns = ['Description', 'Barcode', 'Price']
+            df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
+            df.to_csv(DB_STORAGE, index=False)
+            st.cache_data.clear()
+            st.success("Banco de dados atualizado com sucesso!")
+        except Exception as e:
+            st.error(f"Erro ao carregar banco: {e}")
 
 # --- ABA 3: USUÁRIOS ---
 elif aba == "👤 Usuários":
-    # (O código de usuários permanece idêntico ao original)
     st.title("👤 Administração de Usuários")
     users = load_users()
-    
     col_novo, col_edit = st.columns(2)
-    
     with col_novo:
         st.subheader("➕ Novo Usuário")
         with st.form("Novo"):
@@ -218,15 +220,12 @@ elif aba == "👤 Usuários":
                     save_users(users)
                     st.success(f"Usuário {new_u} criado!")
                     st.rerun()
-
     with col_edit:
         st.subheader("📝 Editar/Excluir")
         user_to_edit = st.selectbox("Selecione o usuário", list(users.keys()))
-        
         if user_to_edit:
             edit_p = st.text_input("Nova Senha", value=users[user_to_edit]["password"])
             edit_exp = st.text_input("Expiração (AAAA-MM-DD)", value=users[user_to_edit]["expiry"])
-            
             c_btn1, c_btn2 = st.columns(2)
             if c_btn1.button("Salvar Alterações"):
                 users[user_to_edit]["password"] = edit_p
@@ -234,7 +233,6 @@ elif aba == "👤 Usuários":
                 save_users(users)
                 st.success("Atualizado!")
                 st.rerun()
-                
             if user_to_edit != "admin":
                 if c_btn2.button("❌ Excluir Usuário", type="primary"):
                     del users[user_to_edit]
