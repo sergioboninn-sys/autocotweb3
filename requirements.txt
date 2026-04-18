@@ -3,3 +3,5 @@ pandas
 openpyxl
 xlrd
 pyxlsb
+xlrd==2.0.1
+xlutils
