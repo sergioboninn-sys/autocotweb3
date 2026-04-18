@@ -15,10 +15,6 @@ st.set_page_config(page_title="Automatizador de Preços PRO", layout="wide")
 DB_STORAGE = "master_database.csv"
 USERS_STORAGE = "users_db.json"
 
-if not os.path.exists(USERS_STORAGE):
-    with open(USERS_STORAGE, "w") as f:
-        json.dump({"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}, f)
-
 def load_users():
     if not os.path.exists(USERS_STORAGE):
         return {"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}
@@ -55,18 +51,15 @@ def extra_round(valor):
     return float(Decimal(str(valor)).quantize(Decimal('0.00'), rounding=ROUND_HALF_UP))
 
 def clean_barcode(val):
-    """Limpa e padroniza códigos de barras para comparação"""
+    """Limpa radicalmente o código de barras"""
     if pd.isna(val) or val is None: return ""
-    # Remove decimais .0, espaços e caracteres não numéricos
-    text = str(val).split('.')[0].strip()
-    return re.sub(r'\D', '', text)
+    # Remove .0 (caso venha do excel como float), remove espaços e tudo que não é dígito
+    s = str(val).split('.')[0].strip()
+    return re.sub(r'\D', '', s)
 
 def extract_all_barcodes(val):
-    """Extrai códigos de barras válidos (8 a 14 dígitos)"""
     cleaned = clean_barcode(val)
-    if len(cleaned) >= 8 and len(cleaned) <= 14:
-        return [cleaned]
-    return []
+    return [cleaned] if len(cleaned) >= 8 else []
 
 def similarity(a, b):
     return SequenceMatcher(None, str(a).upper().strip(), str(b).upper().strip()).ratio()
@@ -79,8 +72,9 @@ def extrair_detalhes(texto):
 def get_master_db():
     if os.path.exists(DB_STORAGE):
         df = pd.read_csv(DB_STORAGE)
-        # Padroniza a coluna de barras do banco para string limpa
         df['Barcode'] = df['Barcode'].apply(clean_barcode)
+        # Remove códigos vazios que podem quebrar o dicionário
+        df = df[df['Barcode'] != ""]
         return df
     return pd.DataFrame(columns=['Description', 'Barcode', 'Price'])
 
@@ -118,8 +112,8 @@ if aba == "📊 Cotação":
         price_col = col3.selectbox("Coluna Preço", t_df_view.columns)
 
         if st.button("🚀 Processar e Preservar Formatação"):
-            # Cria mapa de preços garantindo que a chave seja string limpa
-            price_map = dict(zip(master_db['Barcode'], master_db['Price']))
+            # Mapa de preços com chaves limpas
+            price_map = {str(k): v for k, v in zip(master_db['Barcode'], master_db['Price'])}
             
             target_file.seek(0)
             wb = openpyxl.load_workbook(target_file)
@@ -133,11 +127,13 @@ if aba == "📊 Cotação":
                 d_idx = col_indices[desc_col.strip()]
                 b_idx = col_indices[bar_col.strip()]
                 p_idx = col_indices[price_col.strip()]
-            except:
-                st.error("Erro ao mapear colunas. Verifique a linha do cabeçalho.")
+            except Exception as e:
+                st.error(f"Erro no mapeamento: {e}")
                 st.stop()
 
             count = 0
+            ean_debug = [] # Para verificar o item específico
+            
             for r in range(int(start_row), ws.max_row + 1):
                 d_val = ws.cell(row=r, column=d_idx).value
                 b_val = ws.cell(row=r, column=b_idx).value
@@ -148,13 +144,15 @@ if aba == "📊 Cotação":
                 
                 # Busca por Código de Barras
                 if "Barras" in modo or "Híbrido" in modo:
-                    bcodes = extract_all_barcodes(b_val)
-                    for b in bcodes:
-                        if b in price_map:
-                            found_p = price_map[b]
-                            break
-                
-                # Busca por Similaridade (se barras falhar ou se modo permitir)
+                    cleaned_b = clean_barcode(b_val)
+                    if cleaned_b in price_map:
+                        found_p = price_map[cleaned_b]
+                    
+                    # Log para o EAN específico que você citou
+                    if "7896016601972" in str(b_val):
+                        ean_debug.append(f"Linha {r}: Lido como '{b_val}', Limpo como '{cleaned_b}', Encontrado: {found_p is not None}")
+
+                # Busca por Similaridade
                 if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
                     best_sim = 0
                     d_detalhes = extrair_detalhes(d_val)
@@ -174,7 +172,14 @@ if aba == "📊 Cotação":
 
             output = io.BytesIO()
             wb.save(output)
-            st.success(f"Sucesso! {count} itens preenchidos mantendo o layout original.")
+            st.success(f"Sucesso! {count} itens preenchidos.")
+            
+            if ean_debug:
+                with st.expander("🔍 Verificação do item 7896016601972"):
+                    for msg in ean_debug: st.write(msg)
+                    if "7896016601972" not in price_map:
+                        st.error("O EAN 7896016601972 NÃO foi encontrado no Banco de Dados carregado.")
+            
             st.download_button("📥 Baixar Planilha Pronta", output.getvalue(), "cotacao_final.xlsx")
 
 # --- ABA 2: GERENCIAR BANCO ---
@@ -185,7 +190,6 @@ elif aba == "⚙️ Gerenciar Banco":
         df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
         df = df.iloc[:, [0, 1, 2]]
         df.columns = ['Description', 'Barcode', 'Price']
-        # Limpeza rigorosa no momento do upload
         df['Barcode'] = df['Barcode'].apply(clean_barcode)
         df.to_csv(DB_STORAGE, index=False)
         st.cache_data.clear()
@@ -204,11 +208,7 @@ elif aba == "👤 Usuários":
             days = st.number_input("Dias de validade", 1, 365, 30)
             if st.form_submit_button("Criar"):
                 if new_u and new_p:
-                    users[new_u] = {
-                        "password": new_p, 
-                        "expiry": (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d"),
-                        "role": "user"
-                    }
+                    users[new_u] = {"password": new_p, "expiry": (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d"), "role": "user"}
                     save_users(users)
                     st.success(f"Usuário {new_u} criado!")
                     st.rerun()
