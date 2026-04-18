@@ -5,6 +5,7 @@ import re
 import json
 import os
 import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from difflib import SequenceMatcher
@@ -132,75 +133,111 @@ if aba == "📊 Cotação":
                 st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
             except Exception as e: st.error(f"Erro: {e}")
 
-# --- ABA 2: SISTEMA DE VENDAS (NOVA) ---
+# --- ABA 2: SISTEMA DE VENDAS (MELHORADA) ---
 elif aba == "💰 Vendas":
     st.title("💰 Consulta e Pré-Pedido")
     master_db = get_master_db()
     
-    col_c1, col_c2 = st.columns([2, 1])
+    col_vendas_1, col_vendas_2 = st.columns([3, 1])
     
-    with col_c1:
-        st.subheader("🔍 Busca de Produtos")
-        query = st.text_input("Produto (Ex: 'ref tang' ou 'deter%ipe')", placeholder="Digite parte do nome...")
-        desc_geral = st.number_input("Desconto Geral na Tabela (%)", 0.0, 100.0, 0.0)
+    with col_vendas_1:
+        st.subheader("🔍 Busca e Adição Rápida")
+        query = st.text_input("Pesquisar produto (ex: 'ref tang'):", placeholder="Digite e pressione Enter")
+        desc_geral = st.number_input("Desconto Padrão na Tabela (%)", 0.0, 100.0, 0.0)
         
         if query:
-            # Lógica de Busca Avançada
             search_terms = query.replace('%', ' ').split()
             mask = master_db['Description'].apply(lambda x: all(term.upper() in str(x).upper() for term in search_terms))
-            results = master_db[mask].copy()
+            results = master_db[mask].head(20).copy() # Mostra top 20 para performance
             
             if not results.empty:
-                results['Preço Tabela'] = results['Price']
-                results['Preço c/ Desc'] = results['Price'] * (1 - (desc_geral/100))
-                results['Preço c/ Desc'] = results['Preço c/ Desc'].apply(extra_round)
-                
-                st.dataframe(results[['Description', 'Barcode', 'Preço Tabela', 'Preço c/ Desc']], use_container_width=True)
-                
-                # Seleção para Pedido
+                st.write(f"Resultados para: {query}")
+                for idx, row in results.iterrows():
+                    p_base = float(row['Price'])
+                    p_sugestao = extra_round(p_base * (1 - (desc_geral/100)))
+                    
+                    # Layout intuitivo por linha
+                    with st.container():
+                        c_desc, c_ean, c_preco, c_qtd, c_add = st.columns([3, 1.5, 1.2, 1, 0.5])
+                        c_desc.write(f"**{row['Description']}**")
+                        c_ean.write(f"`{row['Barcode']}`")
+                        c_preco.write(f"R$ {p_sugestao}")
+                        
+                        # Chave única para cada linha de busca
+                        input_qtd = c_qtd.number_input("Qtd", 1, 1000, 1, key=f"qtd_{idx}")
+                        
+                        if c_add.button("➕", key=f"btn_{idx}"):
+                            st.session_state.carrinho.append({
+                                "Descrição": row['Description'],
+                                "EAN": row['Barcode'],
+                                "Qtd": input_qtd,
+                                "Preço Unit": p_sugestao,
+                                "Total": extra_round(p_sugestao * input_qtd)
+                            })
+                            st.toast(f"Adicionado: {row['Description']}")
                 st.divider()
-                selected_prod = st.selectbox("Selecione o produto para o pedido:", results['Description'].tolist())
-                prod_data = results[results['Description'] == selected_prod].iloc[0]
-                
-                c_v1, c_v2, c_v3 = st.columns(3)
-                qtd = c_v1.number_input("Quantidade", 1, 1000, 1)
-                desc_ind = c_v2.number_input("Desconto Unitário (%)", 0.0, 100.0, desc_geral)
-                
-                preco_venda = prod_data['Price'] * (1 - (desc_ind/100))
-                c_v3.metric("Preço Unit. Venda", f"R$ {extra_round(preco_venda)}")
-                
-                if st.button("➕ Adicionar ao Pedido"):
-                    item = {
-                        "Descrição": prod_data['Description'],
-                        "EAN": prod_data['Barcode'],
-                        "Qtd": qtd,
-                        "Preço Unit": extra_round(preco_venda),
-                        "Total": extra_round(preco_venda * qtd)
-                    }
-                    st.session_state.carrinho.append(item)
-                    st.toast("Item adicionado!")
             else:
                 st.error("Nenhum produto encontrado.")
 
-    with col_c2:
-        st.subheader("🛒 Resumo do Pedido")
+    with col_vendas_2:
+        st.subheader("🛒 Seu Pedido")
         if st.session_state.carrinho:
             df_cart = pd.DataFrame(st.session_state.carrinho)
-            st.table(df_cart[['Descrição', 'Qtd', 'Total']])
-            total_geral = df_cart['Total'].sum()
-            st.metric("TOTAL DO PEDIDO", f"R$ {extra_round(total_geral)}")
+            for i, item in enumerate(st.session_state.carrinho):
+                st.write(f"{item['Qtd']}x {item['Descrição']} - **R$ {item['Total']}**")
             
-            if st.button("🗑️ Limpar Pedido"):
+            total_pedido = df_cart['Total'].sum()
+            st.metric("Total Geral", f"R$ {extra_round(total_pedido)}")
+            
+            if st.button("🗑️ Limpar Tudo"):
                 st.session_state.carrinho = []
                 st.rerun()
-            
-            # Exportar Pedido
-            csv_pedido = df_cart.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar Pré-Pedido (CSV)", csv_pedido, f"pedido_{datetime.now().strftime('%H%M%S')}.csv")
-        else:
-            st.info("O carrinho está vazio.")
 
-# --- ABA 3: GERENCIAR BANCO (MANTIDA) ---
+            # --- EXPORTAÇÃO EXCEL XLSX ---
+            if st.session_state.carrinho:
+                output_xlsx = io.BytesIO()
+                wb_ped = openpyxl.Workbook()
+                ws_ped = wb_ped.active
+                ws_ped.title = "Pré-Pedido"
+                
+                # Estilos
+                header_style = Font(bold=True, color="FFFFFF")
+                header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+                align_center = Alignment(horizontal="center")
+
+                # Cabeçalho
+                headers = ["Descrição", "Código EAN", "Qtd", "Preço Unit.", "Total"]
+                ws_ped.append(headers)
+                for cell in ws_ped[1]:
+                    cell.font = header_style
+                    cell.fill = header_fill
+                    cell.alignment = align_center
+
+                # Dados
+                for item in st.session_state.carrinho:
+                    ws_ped.append([item['Descrição'], item['EAN'], item['Qtd'], item['Preço Unit'], item['Total']])
+                
+                # Rodapé com Total
+                ws_ped.append([])
+                ws_ped.append(["", "", "", "TOTAL GERAL:", extra_round(total_pedido)])
+                ws_ped.cell(row=ws_ped.max_row, column=4).font = Font(bold=True)
+                ws_ped.cell(row=ws_ped.max_row, column=5).font = Font(bold=True)
+
+                # Ajuste de Colunas
+                ws_ped.column_dimensions['A'].width = 50
+                ws_ped.column_dimensions['B'].width = 20
+                
+                wb_ped.save(output_xlsx)
+                st.download_button(
+                    label="📥 Baixar Pedido em Excel (.xlsx)",
+                    data=output_xlsx.getvalue(),
+                    file_name=f"pedido_{datetime.now().strftime('%d_%m_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+        else:
+            st.info("Carrinho vazio.")
+
+# --- ABA 3: GERENCIAR BANCO ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco")
     f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
@@ -213,12 +250,10 @@ elif aba == "⚙️ Gerenciar Banco":
         st.cache_data.clear()
         st.success("Banco Atualizado!")
 
-# --- ABA 4: USUÁRIOS (MANTIDA) ---
+# --- ABA 4: USUÁRIOS ---
 elif aba == "👤 Usuários":
     st.title("👤 Gestão de Usuários")
     users = load_users()
-    
-    # Backup/Restauração
     c_b1, c_b2 = st.columns(2)
     with c_b1:
         df_u = pd.DataFrame.from_dict(users, orient='index').reset_index()
