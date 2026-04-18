@@ -20,6 +20,8 @@ if not os.path.exists(USERS_STORAGE):
         json.dump({"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}, f)
 
 def load_users():
+    if not os.path.exists(USERS_STORAGE):
+        return {"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}
     with open(USERS_STORAGE, "r") as f: return json.load(f)
 
 def save_users(users):
@@ -175,22 +177,44 @@ elif aba == "👤 Usuários":
     st.title("👤 Administração de Usuários")
     users = load_users()
 
-    # --- NOVO: FUNÇÃO DE BACKUP ---
-    st.subheader("📥 Backup de Segurança")
-    # Converte o JSON de usuários para DataFrame para exportação fácil
-    df_users = pd.DataFrame.from_dict(users, orient='index').reset_index()
-    df_users.columns = ['Usuario', 'Senha', 'Expiracao', 'Nivel']
+    # --- SEÇÃO DE BACKUP E RESTAURAÇÃO ---
+    st.subheader("💾 Gestão de Backup")
+    c_back1, c_back2 = st.columns(2)
     
-    csv_users = df_users.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="Download Lista de Usuários (CSV)",
-        data=csv_users,
-        file_name=f"backup_usuarios_{datetime.now().strftime('%Y-%m-%d')}.csv",
-        mime="text/csv",
-    )
+    with c_back1:
+        # Exportação
+        df_users = pd.DataFrame.from_dict(users, orient='index').reset_index()
+        df_users.columns = ['Usuario', 'Senha', 'Expiracao', 'Nivel']
+        csv_users = df_users.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Baixar Backup de Usuários (CSV)",
+            data=csv_users,
+            file_name=f"backup_usuarios_{datetime.now().strftime('%Y-%m-%d')}.csv",
+            mime="text/csv",
+        )
+    
+    with c_back2:
+        # Importação (Restauração)
+        uploaded_backup = st.file_uploader("📤 Restaurar Usuários via CSV", type=["csv"])
+        if uploaded_backup and st.button("🔥 Confirmar Restauração"):
+            try:
+                df_restored = pd.read_csv(uploaded_backup)
+                new_users_dict = {}
+                for _, row in df_restored.iterrows():
+                    new_users_dict[str(row['Usuario'])] = {
+                        "password": str(row['Senha']),
+                        "expiry": str(row['Expiracao']),
+                        "role": str(row['Nivel'])
+                    }
+                save_users(new_users_dict)
+                st.success("✅ Usuários restaurados com sucesso!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao restaurar arquivo: {e}")
+    
     st.markdown("---")
-    # ------------------------------
     
+    # --- GESTÃO MANUAL ---
     col_novo, col_edit = st.columns(2)
     
     with col_novo:
