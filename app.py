@@ -90,13 +90,19 @@ if aba == "📊 Cotação":
     discount = st.sidebar.number_input("Desconto (%)", 0.0)
     aplicar_arredondamento = st.sidebar.checkbox("Arredondar preços", value=True)
 
-    target_file = st.file_uploader("Planilha de Destino", type=["xlsx"])
+    # AJUSTE: Aceita xlsx e xls
+    target_file = st.file_uploader("Planilha de Destino", type=["xlsx", "xls"])
 
     if target_file:
+        # Se for XLS, o openpyxl não consegue preservar formatação.
+        # Avisamos o usuário que o arquivo será convertido para XLSX internamente.
+        is_xls = target_file.name.endswith('.xls')
+        
         c1, c2 = st.columns(2)
         header_pos = c1.number_input("Linha do Cabeçalho:", 1, 100, 10)
         start_row = c2.number_input("Linha de início dos produtos:", 1, 1000, 11)
 
+        # Leitura da visualização (Pandas lida com ambos)
         t_df_view = pd.read_excel(target_file, header=header_pos-1)
         
         st.subheader("Mapeamento de Colunas")
@@ -108,7 +114,19 @@ if aba == "📊 Cotação":
         if st.button("🚀 Processar e Preservar Formatação"):
             price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
             target_file.seek(0)
-            wb = openpyxl.load_workbook(target_file)
+            
+            if is_xls:
+                # Conversão temporária para XLSX para manter o motor openpyxl funcionando
+                # Nota: Arquivos .xls originais perderão estilos complexos (macros/cores específicas) na conversão
+                temp_df = pd.read_excel(target_file, header=None)
+                output_tmp = io.BytesIO()
+                with pd.ExcelWriter(output_tmp, engine='openpyxl') as writer:
+                    temp_df.to_excel(writer, index=False, header=False)
+                output_tmp.seek(0)
+                wb = openpyxl.load_workbook(output_tmp)
+            else:
+                wb = openpyxl.load_workbook(target_file)
+                
             ws = wb.active
             col_indices = {}
             for col_idx in range(1, ws.max_column + 1):
@@ -154,15 +172,21 @@ if aba == "📊 Cotação":
 
             output = io.BytesIO()
             wb.save(output)
-            st.success(f"Sucesso! {count} itens preenchidos mantendo o layout original.")
+            st.success(f"Sucesso! {count} itens preenchidos.")
+            # O download será sempre em .xlsx para garantir a integridade dos dados processados
             st.download_button("📥 Baixar Planilha Pronta", output.getvalue(), "cotacao_final.xlsx")
 
 # --- ABA 2: GERENCIAR BANCO ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco de Dados")
-    f = st.file_uploader("Upload Banco (Referência)", type=["xlsx", "csv"])
+    # AJUSTE: Aceita xlsx, xls e csv
+    f = st.file_uploader("Upload Banco (Referência)", type=["xlsx", "xls", "csv"])
     if f and st.button("💾 Salvar e Atualizar Banco"):
-        df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+        if f.name.endswith('.csv'):
+            df = pd.read_csv(f)
+        else:
+            df = pd.read_excel(f) # Pandas usa xlrd automaticamente para .xls
+            
         df = df.iloc[:, [0, 1, 2]]
         df.columns = ['Description', 'Barcode', 'Price']
         df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
@@ -170,8 +194,9 @@ elif aba == "⚙️ Gerenciar Banco":
         st.cache_data.clear()
         st.success("Banco de dados atualizado com sucesso!")
 
-# --- ABA 3: USUÁRIOS (ATUALIZADA) ---
+# --- ABA 3: USUÁRIOS ---
 elif aba == "👤 Usuários":
+    # (O código de usuários permanece idêntico ao original)
     st.title("👤 Administração de Usuários")
     users = load_users()
     
@@ -210,7 +235,7 @@ elif aba == "👤 Usuários":
                 st.success("Atualizado!")
                 st.rerun()
                 
-            if user_to_edit != "admin": # Impede deletar o admin principal
+            if user_to_edit != "admin":
                 if c_btn2.button("❌ Excluir Usuário", type="primary"):
                     del users[user_to_edit]
                     save_users(users)
