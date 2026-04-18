@@ -174,6 +174,22 @@ elif aba == "⚙️ Gerenciar Banco":
 elif aba == "👤 Usuários":
     st.title("👤 Administração de Usuários")
     users = load_users()
+
+    # --- NOVO: FUNÇÃO DE BACKUP ---
+    st.subheader("📥 Backup de Segurança")
+    # Converte o JSON de usuários para DataFrame para exportação fácil
+    df_users = pd.DataFrame.from_dict(users, orient='index').reset_index()
+    df_users.columns = ['Usuario', 'Senha', 'Expiracao', 'Nivel']
+    
+    csv_users = df_users.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download Lista de Usuários (CSV)",
+        data=csv_users,
+        file_name=f"backup_usuarios_{datetime.now().strftime('%Y-%m-%d')}.csv",
+        mime="text/csv",
+    )
+    st.markdown("---")
+    # ------------------------------
     
     col_novo, col_edit = st.columns(2)
     
