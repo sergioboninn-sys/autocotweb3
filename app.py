@@ -20,6 +20,8 @@ if not os.path.exists(USERS_STORAGE):
         json.dump({"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}, f)
 
 def load_users():
+    if not os.path.exists(USERS_STORAGE):
+        return {"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}
     with open(USERS_STORAGE, "r") as f: return json.load(f)
 
 def save_users(users):
@@ -52,10 +54,19 @@ def extra_round(valor):
     if pd.isna(valor): return valor
     return float(Decimal(str(valor)).quantize(Decimal('0.00'), rounding=ROUND_HALF_UP))
 
+def clean_barcode(val):
+    """Limpa e padroniza códigos de barras para comparação"""
+    if pd.isna(val) or val is None: return ""
+    # Remove decimais .0, espaços e caracteres não numéricos
+    text = str(val).split('.')[0].strip()
+    return re.sub(r'\D', '', text)
+
 def extract_all_barcodes(val):
-    if pd.isna(val) or val is None: return []
-    text = str(val).split('.')[0]
-    return re.findall(r'\d{8,14}', text)
+    """Extrai códigos de barras válidos (8 a 14 dígitos)"""
+    cleaned = clean_barcode(val)
+    if len(cleaned) >= 8 and len(cleaned) <= 14:
+        return [cleaned]
+    return []
 
 def similarity(a, b):
     return SequenceMatcher(None, str(a).upper().strip(), str(b).upper().strip()).ratio()
@@ -68,7 +79,8 @@ def extrair_detalhes(texto):
 def get_master_db():
     if os.path.exists(DB_STORAGE):
         df = pd.read_csv(DB_STORAGE)
-        df['Barcode'] = df['Barcode'].astype(str).str.replace(r'\.0$', '', regex=True)
+        # Padroniza a coluna de barras do banco para string limpa
+        df['Barcode'] = df['Barcode'].apply(clean_barcode)
         return df
     return pd.DataFrame(columns=['Description', 'Barcode', 'Price'])
 
@@ -106,7 +118,9 @@ if aba == "📊 Cotação":
         price_col = col3.selectbox("Coluna Preço", t_df_view.columns)
 
         if st.button("🚀 Processar e Preservar Formatação"):
-            price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
+            # Cria mapa de preços garantindo que a chave seja string limpa
+            price_map = dict(zip(master_db['Barcode'], master_db['Price']))
+            
             target_file.seek(0)
             wb = openpyxl.load_workbook(target_file)
             ws = wb.active
@@ -127,14 +141,20 @@ if aba == "📊 Cotação":
             for r in range(int(start_row), ws.max_row + 1):
                 d_val = ws.cell(row=r, column=d_idx).value
                 b_val = ws.cell(row=r, column=b_idx).value
+                
                 if not d_val and not b_val: continue
+                
                 found_p = None
+                
+                # Busca por Código de Barras
                 if "Barras" in modo or "Híbrido" in modo:
                     bcodes = extract_all_barcodes(b_val)
                     for b in bcodes:
                         if b in price_map:
                             found_p = price_map[b]
                             break
+                
+                # Busca por Similaridade (se barras falhar ou se modo permitir)
                 if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
                     best_sim = 0
                     d_detalhes = extrair_detalhes(d_val)
@@ -165,7 +185,8 @@ elif aba == "⚙️ Gerenciar Banco":
         df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
         df = df.iloc[:, [0, 1, 2]]
         df.columns = ['Description', 'Barcode', 'Price']
-        df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
+        # Limpeza rigorosa no momento do upload
+        df['Barcode'] = df['Barcode'].apply(clean_barcode)
         df.to_csv(DB_STORAGE, index=False)
         st.cache_data.clear()
         st.success("Banco de dados atualizado com sucesso!")
