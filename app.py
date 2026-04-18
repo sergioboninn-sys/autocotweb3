@@ -15,9 +15,8 @@ st.set_page_config(page_title="Automatizador de Preços PRO", layout="wide")
 DB_STORAGE = "master_database.csv"
 USERS_STORAGE = "users_db.json"
 
-if not os.path.exists(USERS_STORAGE):
-    with open(USERS_STORAGE, "w") as f:
-        json.dump({"admin": {"password": "admin123", "expiry": "2099-12-31", "role": "admin"}}, f)
+if 'carrinho' not in st.session_state:
+    st.session_state.carrinho = []
 
 def load_users():
     if not os.path.exists(USERS_STORAGE):
@@ -75,17 +74,15 @@ def get_master_db():
     return pd.DataFrame(columns=['Description', 'Barcode', 'Price'])
 
 # --- INTERFACE ---
-tabs = ["📊 Cotação", "⚙️ Gerenciar Banco"]
+tabs = ["📊 Cotação", "💰 Vendas", "⚙️ Gerenciar Banco"]
 if st.session_state.user_role == "admin": tabs.append("👤 Usuários")
 aba = st.sidebar.radio("Navegação", tabs)
 
-# --- ABA 1: COTAÇÃO ---
+# --- ABA 1: COTAÇÃO (MANTIDA) ---
 if aba == "📊 Cotação":
     st.title("📊 Automatizador de Cotações")
     master_db = get_master_db()
-    
-    if master_db.empty:
-        st.warning("O banco de dados está vazio. Vá em 'Gerenciar Banco' primeiro.")
+    if master_db.empty: st.warning("Banco vazio.")
     
     st.sidebar.header("Configurações")
     modo = st.sidebar.selectbox("Regra de Busca:", ["Híbrido (Barras + Similaridade)", "Apenas Barras", "Apenas Similaridade"])
@@ -93,15 +90,11 @@ if aba == "📊 Cotação":
     aplicar_arredondamento = st.sidebar.checkbox("Arredondar preços", value=True)
 
     target_file = st.file_uploader("Planilha de Destino", type=["xlsx"])
-
     if target_file:
         c1, c2 = st.columns(2)
         header_pos = c1.number_input("Linha do Cabeçalho:", 1, 100, 10)
         start_row = c2.number_input("Linha de início dos produtos:", 1, 1000, 11)
-
         t_df_view = pd.read_excel(target_file, header=header_pos-1)
-        
-        st.subheader("Mapeamento de Colunas")
         col1, col2, col3 = st.columns(3)
         desc_col = col1.selectbox("Coluna Descrição", t_df_view.columns)
         bar_col = col2.selectbox("Coluna Barras", t_df_view.columns)
@@ -112,147 +105,149 @@ if aba == "📊 Cotação":
             target_file.seek(0)
             wb = openpyxl.load_workbook(target_file)
             ws = wb.active
-            col_indices = {}
-            for col_idx in range(1, ws.max_column + 1):
-                val = ws.cell(row=header_pos, column=col_idx).value
-                if val: col_indices[str(val).strip()] = col_idx
-
+            col_indices = {str(ws.cell(row=header_pos, column=i).value).strip(): i for i in range(1, ws.max_column + 1)}
             try:
-                d_idx = col_indices[desc_col.strip()]
-                b_idx = col_indices[bar_col.strip()]
-                p_idx = col_indices[price_col.strip()]
-            except:
-                st.error("Erro ao mapear colunas. Verifique a linha do cabeçalho.")
-                st.stop()
+                d_idx, b_idx, p_idx = col_indices[desc_col.strip()], col_indices[bar_col.strip()], col_indices[price_col.strip()]
+                count = 0
+                for r in range(int(start_row), ws.max_row + 1):
+                    d_val, b_val = ws.cell(row=r, column=d_idx).value, ws.cell(row=r, column=b_idx).value
+                    found_p = None
+                    if "Barras" in modo or "Híbrido" in modo:
+                        for b in extract_all_barcodes(b_val):
+                            if b in price_map: found_p = price_map[b]; break
+                    if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
+                        best_sim = 0
+                        d_det = extrair_detalhes(d_val)
+                        for _, row_db in master_db.iterrows():
+                            sim = similarity(d_val, row_db['Description'])
+                            if sim >= 0.75 and d_det == extrair_detalhes(row_db['Description']):
+                                if sim > best_sim: best_sim = sim; found_p = row_db['Price']
+                    if found_p:
+                        f_p = float(found_p) * (1 - (discount/100))
+                        ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
+                        count += 1
+                out = io.BytesIO()
+                wb.save(out)
+                st.success(f"{count} itens preenchidos!")
+                st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
+            except Exception as e: st.error(f"Erro: {e}")
 
-            count = 0
-            for r in range(int(start_row), ws.max_row + 1):
-                d_val = ws.cell(row=r, column=d_idx).value
-                b_val = ws.cell(row=r, column=b_idx).value
-                if not d_val and not b_val: continue
-                found_p = None
-                if "Barras" in modo or "Híbrido" in modo:
-                    bcodes = extract_all_barcodes(b_val)
-                    for b in bcodes:
-                        if b in price_map:
-                            found_p = price_map[b]
-                            break
-                if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
-                    best_sim = 0
-                    d_detalhes = extrair_detalhes(d_val)
-                    for _, row_db in master_db.iterrows():
-                        sim_val = similarity(d_val, row_db['Description'])
-                        if sim_val >= 0.75 and d_detalhes == extrair_detalhes(row_db['Description']):
-                            if sim_val > best_sim:
-                                best_sim = sim_val
-                                found_p = row_db['Price']
+# --- ABA 2: SISTEMA DE VENDAS (NOVA) ---
+elif aba == "💰 Vendas":
+    st.title("💰 Consulta e Pré-Pedido")
+    master_db = get_master_db()
+    
+    col_c1, col_c2 = st.columns([2, 1])
+    
+    with col_c1:
+        st.subheader("🔍 Busca de Produtos")
+        query = st.text_input("Produto (Ex: 'ref tang' ou 'deter%ipe')", placeholder="Digite parte do nome...")
+        desc_geral = st.number_input("Desconto Geral na Tabela (%)", 0.0, 100.0, 0.0)
+        
+        if query:
+            # Lógica de Busca Avançada
+            search_terms = query.replace('%', ' ').split()
+            mask = master_db['Description'].apply(lambda x: all(term.upper() in str(x).upper() for term in search_terms))
+            results = master_db[mask].copy()
+            
+            if not results.empty:
+                results['Preço Tabela'] = results['Price']
+                results['Preço c/ Desc'] = results['Price'] * (1 - (desc_geral/100))
+                results['Preço c/ Desc'] = results['Preço c/ Desc'].apply(extra_round)
+                
+                st.dataframe(results[['Description', 'Barcode', 'Preço Tabela', 'Preço c/ Desc']], use_container_width=True)
+                
+                # Seleção para Pedido
+                st.divider()
+                selected_prod = st.selectbox("Selecione o produto para o pedido:", results['Description'].tolist())
+                prod_data = results[results['Description'] == selected_prod].iloc[0]
+                
+                c_v1, c_v2, c_v3 = st.columns(3)
+                qtd = c_v1.number_input("Quantidade", 1, 1000, 1)
+                desc_ind = c_v2.number_input("Desconto Unitário (%)", 0.0, 100.0, desc_geral)
+                
+                preco_venda = prod_data['Price'] * (1 - (desc_ind/100))
+                c_v3.metric("Preço Unit. Venda", f"R$ {extra_round(preco_venda)}")
+                
+                if st.button("➕ Adicionar ao Pedido"):
+                    item = {
+                        "Descrição": prod_data['Description'],
+                        "EAN": prod_data['Barcode'],
+                        "Qtd": qtd,
+                        "Preço Unit": extra_round(preco_venda),
+                        "Total": extra_round(preco_venda * qtd)
+                    }
+                    st.session_state.carrinho.append(item)
+                    st.toast("Item adicionado!")
+            else:
+                st.error("Nenhum produto encontrado.")
 
-                if found_p is not None:
-                    final_p = float(found_p) * (1 - (discount / 100))
-                    if aplicar_arredondamento:
-                        final_p = extra_round(final_p)
-                    ws.cell(row=r, column=p_idx).value = final_p
-                    count += 1
+    with col_c2:
+        st.subheader("🛒 Resumo do Pedido")
+        if st.session_state.carrinho:
+            df_cart = pd.DataFrame(st.session_state.carrinho)
+            st.table(df_cart[['Descrição', 'Qtd', 'Total']])
+            total_geral = df_cart['Total'].sum()
+            st.metric("TOTAL DO PEDIDO", f"R$ {extra_round(total_geral)}")
+            
+            if st.button("🗑️ Limpar Pedido"):
+                st.session_state.carrinho = []
+                st.rerun()
+            
+            # Exportar Pedido
+            csv_pedido = df_cart.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Baixar Pré-Pedido (CSV)", csv_pedido, f"pedido_{datetime.now().strftime('%H%M%S')}.csv")
+        else:
+            st.info("O carrinho está vazio.")
 
-            output = io.BytesIO()
-            wb.save(output)
-            st.success(f"Sucesso! {count} itens preenchidos mantendo o layout original.")
-            st.download_button("📥 Baixar Planilha Pronta", output.getvalue(), "cotacao_final.xlsx")
-
-# --- ABA 2: GERENCIAR BANCO ---
+# --- ABA 3: GERENCIAR BANCO (MANTIDA) ---
 elif aba == "⚙️ Gerenciar Banco":
-    st.title("⚙️ Gerenciar Banco de Dados")
-    f = st.file_uploader("Upload Banco (Referência)", type=["xlsx", "csv"])
-    if f and st.button("💾 Salvar e Atualizar Banco"):
+    st.title("⚙️ Gerenciar Banco")
+    f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
+    if f and st.button("💾 Salvar Banco"):
         df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
         df = df.iloc[:, [0, 1, 2]]
         df.columns = ['Description', 'Barcode', 'Price']
         df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
         df.to_csv(DB_STORAGE, index=False)
         st.cache_data.clear()
-        st.success("Banco de dados atualizado com sucesso!")
+        st.success("Banco Atualizado!")
 
-# --- ABA 3: USUÁRIOS ---
+# --- ABA 4: USUÁRIOS (MANTIDA) ---
 elif aba == "👤 Usuários":
-    st.title("👤 Administração de Usuários")
+    st.title("👤 Gestão de Usuários")
     users = load_users()
+    
+    # Backup/Restauração
+    c_b1, c_b2 = st.columns(2)
+    with c_b1:
+        df_u = pd.DataFrame.from_dict(users, orient='index').reset_index()
+        df_u.columns = ['Usuario', 'Senha', 'Expiracao', 'Nivel']
+        st.download_button("📥 Baixar Backup Usuários", df_u.to_csv(index=False).encode('utf-8'), "backup_users.csv")
+    with c_b2:
+        up_b = st.file_uploader("📤 Restaurar Usuários", type=["csv"])
+        if up_b and st.button("🔥 Restaurar"):
+            df_r = pd.read_csv(up_b)
+            new_u = {str(r['Usuario']): {"password": str(r['Senha']), "expiry": str(r['Expiracao']), "role": str(r['Nivel'])} for _, r in df_r.iterrows()}
+            save_users(new_u); st.success("Restaurado!"); st.rerun()
 
-    # --- SEÇÃO DE BACKUP E RESTAURAÇÃO ---
-    st.subheader("💾 Gestão de Backup")
-    c_back1, c_back2 = st.columns(2)
-    
-    with c_back1:
-        # Exportação
-        df_users = pd.DataFrame.from_dict(users, orient='index').reset_index()
-        df_users.columns = ['Usuario', 'Senha', 'Expiracao', 'Nivel']
-        csv_users = df_users.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Baixar Backup de Usuários (CSV)",
-            data=csv_users,
-            file_name=f"backup_usuarios_{datetime.now().strftime('%Y-%m-%d')}.csv",
-            mime="text/csv",
-        )
-    
-    with c_back2:
-        # Importação (Restauração)
-        uploaded_backup = st.file_uploader("📤 Restaurar Usuários via CSV", type=["csv"])
-        if uploaded_backup and st.button("🔥 Confirmar Restauração"):
-            try:
-                df_restored = pd.read_csv(uploaded_backup)
-                new_users_dict = {}
-                for _, row in df_restored.iterrows():
-                    new_users_dict[str(row['Usuario'])] = {
-                        "password": str(row['Senha']),
-                        "expiry": str(row['Expiracao']),
-                        "role": str(row['Nivel'])
-                    }
-                save_users(new_users_dict)
-                st.success("✅ Usuários restaurados com sucesso!")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao restaurar arquivo: {e}")
-    
-    st.markdown("---")
-    
-    # --- GESTÃO MANUAL ---
-    col_novo, col_edit = st.columns(2)
-    
-    with col_novo:
-        st.subheader("➕ Novo Usuário")
+    st.divider()
+    col_n, col_e = st.columns(2)
+    with col_n:
+        st.subheader("➕ Novo")
         with st.form("Novo"):
-            new_u = st.text_input("Nome do Usuário")
-            new_p = st.text_input("Senha")
-            days = st.number_input("Dias de validade", 1, 365, 30)
+            nu, np, nd = st.text_input("Usuário"), st.text_input("Senha"), st.number_input("Validade (dias)", 1, 365, 30)
             if st.form_submit_button("Criar"):
-                if new_u and new_p:
-                    users[new_u] = {
-                        "password": new_p, 
-                        "expiry": (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d"),
-                        "role": "user"
-                    }
-                    save_users(users)
-                    st.success(f"Usuário {new_u} criado!")
-                    st.rerun()
-
-    with col_edit:
-        st.subheader("📝 Editar/Excluir")
-        user_to_edit = st.selectbox("Selecione o usuário", list(users.keys()))
-        
-        if user_to_edit:
-            edit_p = st.text_input("Nova Senha", value=users[user_to_edit]["password"])
-            edit_exp = st.text_input("Expiração (AAAA-MM-DD)", value=users[user_to_edit]["expiry"])
-            
-            c_btn1, c_btn2 = st.columns(2)
-            if c_btn1.button("Salvar Alterações"):
-                users[user_to_edit]["password"] = edit_p
-                users[user_to_edit]["expiry"] = edit_exp
-                save_users(users)
-                st.success("Atualizado!")
-                st.rerun()
-                
-            if user_to_edit != "admin":
-                if c_btn2.button("❌ Excluir Usuário", type="primary"):
-                    del users[user_to_edit]
-                    save_users(users)
-                    st.warning("Usuário removido.")
-                    st.rerun()
+                users[nu] = {"password": np, "expiry": (datetime.now()+timedelta(days=nd)).strftime("%Y-%m-%d"), "role": "user"}
+                save_users(users); st.success("Criado!"); st.rerun()
+    with col_e:
+        st.subheader("📝 Editar")
+        u_sel = st.selectbox("Usuário", list(users.keys()))
+        if u_sel:
+            ep = st.text_input("Senha", value=users[u_sel]["password"])
+            ex = st.text_input("Expiração", value=users[u_sel]["expiry"])
+            if st.button("Salvar"):
+                users[u_sel].update({"password": ep, "expiry": ex})
+                save_users(users); st.success("Ok!"); st.rerun()
+            if u_sel != "admin" and st.button("❌ Excluir"):
+                del users[u_sel]; save_users(users); st.rerun()
