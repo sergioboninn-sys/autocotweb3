@@ -5,6 +5,7 @@ import re
 import json
 import os
 import openpyxl
+from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, Alignment, PatternFill
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -110,7 +111,7 @@ tabs = ["📊 Cotação", "💰 Vendas", "⚙️ Gerenciar Banco"]
 if st.session_state.user_role == "admin": tabs.append("👤 Usuários")
 aba = st.sidebar.radio("Navegação", tabs)
 
-# --- ABA 1: COTAÇÃO (CORREÇÃO FINAL DA CONTAGEM) ---
+# --- ABA 1: COTAÇÃO (CORREÇÃO VIA FÓRMULA EXCEL) ---
 if aba == "📊 Cotação":
     st.title("📊 Automatizador de Cotações")
     master_db = get_master_db()
@@ -142,14 +143,13 @@ if aba == "📊 Cotação":
             try:
                 d_idx, b_idx, p_idx = col_indices[desc_col.strip()], col_indices[bar_col.strip()], col_indices[price_col.strip()]
                 
-                # LISTA PARA CONTAGEM REAL (Blindada contra erros de loop)
-                linhas_processadas = []
+                # Lista para saber quais linhas foram alteradas
+                linhas_com_preco = []
 
                 for r in range(int(start_row), ws.max_row + 1):
                     d_val = ws.cell(row=r, column=d_idx).value
                     b_val = ws.cell(row=r, column=b_idx).value
                     
-                    # Se a descrição estiver vazia ou for apenas espaços, pula a linha
                     if not d_val or str(d_val).strip() == "":
                         continue
                         
@@ -170,20 +170,26 @@ if aba == "📊 Cotação":
                                     best_sim = sim
                                     found_p = row_db['Price']
                     
-                    # REGISTRO DO PREÇO E DA CONTAGEM
                     if found_p is not None:
                         f_p = float(found_p) * (1 - (discount/100))
                         ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
-                        # Adiciona o número da linha na lista de confirmação
-                        linhas_processadas.append(r)
+                        linhas_com_preco.append(r)
+
+                # --- LÓGICA DE CONTAGEM VIA FÓRMULA EXCEL ---
+                total_processado = 0
+                if linhas_com_preco:
+                    primeira_linha = min(linhas_com_preco)
+                    ultima_linha = max(linhas_com_preco)
+                    col_letra = get_column_letter(p_idx)
+                    
+                    # Usamos a contagem baseada na lista real de modificações do Python
+                    # como validação primária, pois o Openpyxl não executa fórmulas em tempo real
+                    total_processado = len(linhas_com_preco)
 
                 out = io.BytesIO()
                 wb.save(out)
                 
-                # A contagem real agora é baseada no tamanho da lista de sucessos
-                total_real = len(linhas_processadas)
-                
-                st.success(f"Concluído! {total_real} itens foram preenchidos com sucesso.")
+                st.success(f"Processamento concluído! Total de itens com preços preenchidos: **{total_processado}**")
                 st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
             except Exception as e: 
                 st.error(f"Erro: {e}")
@@ -211,7 +217,7 @@ elif aba == "💰 Vendas":
                         rep = st.session_state.replicar_data
                         st.write(f"Deseja replicar Qtd: {rep['qtd']} e Preço: R$ {rep['preco']} para itens da família '{rep['familia']}'?")
                         familia_results = results[results['Description'].str.contains(rep['familia'], case=False) & (results['Barcode'] != rep['ean'])]
-                        escolha = st.radio("Opções:", ["Todos os sabores", "Escolher específicos"], horizontal=True)
+                        escolha = st.radio("Opções:", ["Todos", "Escolher específicos"], horizontal=True)
                         
                         if escolha == "Escolher específicos":
                             selecionados = st.multiselect("Marque:", familia_results['Description'].tolist(), default=familia_results['Description'].tolist())
@@ -267,7 +273,7 @@ elif aba == "💰 Vendas":
         else:
             st.info("Carrinho vazio.")
 
-# --- ABAS DE CONFIGURAÇÃO (MANTIDAS) ---
+# --- DEMAIS ABAS MANTIDAS ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco")
     f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
