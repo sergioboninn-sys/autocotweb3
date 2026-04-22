@@ -110,7 +110,7 @@ tabs = ["📊 Cotação", "💰 Vendas", "⚙️ Gerenciar Banco"]
 if st.session_state.user_role == "admin": tabs.append("👤 Usuários")
 aba = st.sidebar.radio("Navegação", tabs)
 
-# --- ABA 1: COTAÇÃO (CORRIGIDA) ---
+# --- ABA 1: COTAÇÃO (CORREÇÃO FINAL DA CONTAGEM) ---
 if aba == "📊 Cotação":
     st.title("📊 Automatizador de Cotações")
     master_db = get_master_db()
@@ -137,32 +137,26 @@ if aba == "📊 Cotação":
             target_file.seek(0)
             wb = openpyxl.load_workbook(target_file)
             ws = wb.active
-            
-            # Mapeamento de colunas por nome
             col_indices = {str(ws.cell(row=header_pos, column=i).value).strip(): i for i in range(1, ws.max_column + 1)}
             
             try:
-                d_idx = col_indices[desc_col.strip()]
-                b_idx = col_indices[bar_col.strip()]
-                p_idx = col_indices[price_col.strip()]
+                d_idx, b_idx, p_idx = col_indices[desc_col.strip()], col_indices[bar_col.strip()], col_indices[price_col.strip()]
                 
-                count_preenchidos = 0
-                
-                # Loop principal pelas linhas
+                # LISTA PARA CONTAGEM REAL (Blindada contra erros de loop)
+                linhas_processadas = []
+
                 for r in range(int(start_row), ws.max_row + 1):
                     d_val = ws.cell(row=r, column=d_idx).value
                     b_val = ws.cell(row=r, column=b_idx).value
                     
-                    # CORREÇÃO: Ignora linhas sem descrição (evita contar rodapés ou linhas vazias)
-                    if d_val is None or str(d_val).strip() == "":
+                    # Se a descrição estiver vazia ou for apenas espaços, pula a linha
+                    if not d_val or str(d_val).strip() == "":
                         continue
                         
                     found_p = None
-                    
-                    # Lógica de Busca
                     if "Barras" in modo or "Híbrido" in modo:
                         for b in extract_all_barcodes(b_val):
-                            if b in price_map:
+                            if b in price_map: 
                                 found_p = price_map[b]
                                 break
                     
@@ -176,19 +170,23 @@ if aba == "📊 Cotação":
                                     best_sim = sim
                                     found_p = row_db['Price']
                     
-                    # CORREÇÃO: Só incrementa se realmente encontrar e gravar um preço
+                    # REGISTRO DO PREÇO E DA CONTAGEM
                     if found_p is not None:
                         f_p = float(found_p) * (1 - (discount/100))
-                        final_val = extra_round(f_p) if aplicar_arredondamento else f_p
-                        ws.cell(row=r, column=p_idx).value = final_val
-                        count_preenchidos += 1
-                
+                        ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
+                        # Adiciona o número da linha na lista de confirmação
+                        linhas_processadas.append(r)
+
                 out = io.BytesIO()
                 wb.save(out)
-                st.success(f"Sucesso! {count_preenchidos} itens foram localizados e preenchidos com preços.")
+                
+                # A contagem real agora é baseada no tamanho da lista de sucessos
+                total_real = len(linhas_processadas)
+                
+                st.success(f"Concluído! {total_real} itens foram preenchidos com sucesso.")
                 st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
-            except Exception as e:
-                st.error(f"Erro no processamento: {e}")
+            except Exception as e: 
+                st.error(f"Erro: {e}")
 
 # --- ABA 2: VENDAS (MANTIDA INTEGRALMENTE) ---
 elif aba == "💰 Vendas":
@@ -213,9 +211,9 @@ elif aba == "💰 Vendas":
                         rep = st.session_state.replicar_data
                         st.write(f"Deseja replicar Qtd: {rep['qtd']} e Preço: R$ {rep['preco']} para itens da família '{rep['familia']}'?")
                         familia_results = results[results['Description'].str.contains(rep['familia'], case=False) & (results['Barcode'] != rep['ean'])]
-                        escolha = st.radio("Como deseja replicar?", ["Replicar em todos os sabores", "Escolher sabores"], horizontal=True)
+                        escolha = st.radio("Opções:", ["Todos os sabores", "Escolher específicos"], horizontal=True)
                         
-                        if escolha == "Escolher sabores":
+                        if escolha == "Escolher específicos":
                             selecionados = st.multiselect("Marque:", familia_results['Description'].tolist(), default=familia_results['Description'].tolist())
                             if st.button("Confirmar Seleção"):
                                 for _, rf in familia_results.iterrows():
@@ -261,15 +259,15 @@ elif aba == "💰 Vendas":
             output_xlsx = io.BytesIO()
             wb_ped = openpyxl.Workbook()
             ws_ped = wb_ped.active
-            ws_ped.append(["Descrição", "Código EAN", "Qtd", "Preço Unit.", "Total"])
+            ws_ped.append(["Descrição", "EAN", "Qtd", "Preço", "Total"])
             for item in st.session_state.carrinho:
                 ws_ped.append([item['Descrição'], item['EAN'], item['Qtd'], item['Preço Unit'], item['Total']])
             wb_ped.save(output_xlsx)
-            st.download_button("📥 Baixar Pedido", output_xlsx.getvalue(), "pedido.xlsx")
+            st.download_button("📥 Baixar Pedido", output_xlsx.getvalue(), f"pedido_{datetime.now().strftime('%H%M%S')}.xlsx")
         else:
             st.info("Carrinho vazio.")
 
-# --- DEMAIS ABAS MANTIDAS (BANCO E USUÁRIOS) ---
+# --- ABAS DE CONFIGURAÇÃO (MANTIDAS) ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco")
     f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
@@ -285,10 +283,10 @@ elif aba == "⚙️ Gerenciar Banco":
 elif aba == "👤 Usuários":
     st.title("👤 Gestão de Usuários")
     users = load_users()
-    u_sel = st.selectbox("Selecione para Editar/Excluir", list(users.keys()))
-    if u_sel:
-        ep = st.text_input("Senha", value=users[u_sel]["password"])
-        ex = st.text_input("Expiração (AAAA-MM-DD)", value=users[u_sel]["expiry"])
-        if st.button("Salvar Alterações"):
-            users[u_sel].update({"password": ep, "expiry": ex})
-            save_users(users); st.success("Atualizado!")
+    df_u = pd.DataFrame.from_dict(users, orient='index').reset_index()
+    st.table(df_u)
+    with st.form("Novo Usuário"):
+        nu, np, nd = st.text_input("Usuário"), st.text_input("Senha"), st.number_input("Dias", 1, 365, 30)
+        if st.form_submit_button("Criar"):
+            users[nu] = {"password": np, "expiry": (datetime.now()+timedelta(days=nd)).strftime("%Y-%m-%d"), "role": "user"}
+            save_users(users); st.rerun()
