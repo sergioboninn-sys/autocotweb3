@@ -111,7 +111,7 @@ tabs = ["📊 Cotação", "💰 Vendas", "⚙️ Gerenciar Banco"]
 if st.session_state.user_role == "admin": tabs.append("👤 Usuários")
 aba = st.sidebar.radio("Navegação", tabs)
 
-# --- ABA 1: COTAÇÃO (MANTIDA INTEGRALMENTE) ---
+# --- ABA 1: COTAÇÃO (CORRIGIDA) ---
 if aba == "📊 Cotação":
     st.title("📊 Automatizador de Cotações")
     master_db = get_master_db()
@@ -139,33 +139,51 @@ if aba == "📊 Cotação":
             wb = openpyxl.load_workbook(target_file)
             ws = wb.active
             col_indices = {str(ws.cell(row=header_pos, column=i).value).strip(): i for i in range(1, ws.max_column + 1)}
+            
             try:
                 d_idx, b_idx, p_idx = col_indices[desc_col.strip()], col_indices[bar_col.strip()], col_indices[price_col.strip()]
                 count = 0
+                
+                # Itera sobre as linhas da planilha
                 for r in range(int(start_row), ws.max_row + 1):
-                    d_val, b_val = ws.cell(row=r, column=d_idx).value, ws.cell(row=r, column=b_idx).value
+                    d_val = ws.cell(row=r, column=d_idx).value
+                    b_val = ws.cell(row=r, column=b_idx).value
+                    
+                    # CORREÇÃO: Ignora linhas onde a descrição está vazia (evita contar linhas fantasmas/rodapés)
+                    if d_val is None or str(d_val).strip() == "":
+                        continue
+                        
                     found_p = None
                     if "Barras" in modo or "Híbrido" in modo:
                         for b in extract_all_barcodes(b_val):
-                            if b in price_map: found_p = price_map[b]; break
+                            if b in price_map: 
+                                found_p = price_map[b]
+                                break
+                                
                     if found_p is None and ("Similaridade" in modo or "Híbrido" in modo) and d_val:
                         best_sim = 0
                         d_det = extrair_detalhes(d_val)
                         for _, row_db in master_db.iterrows():
                             sim = similarity(d_val, row_db['Description'])
                             if sim >= 0.75 and d_det == extrair_detalhes(row_db['Description']):
-                                if sim > best_sim: best_sim = sim; found_p = row_db['Price']
-                    if found_p:
+                                if sim > best_sim: 
+                                    best_sim = sim
+                                    found_p = row_db['Price']
+                    
+                    # CORREÇÃO: O contador só incrementa se o preço foi efetivamente encontrado
+                    if found_p is not None:
                         f_p = float(found_p) * (1 - (discount/100))
                         ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
                         count += 1
+                
                 out = io.BytesIO()
                 wb.save(out)
                 st.success(f"{count} itens preenchidos!")
                 st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
-            except Exception as e: st.error(f"Erro: {e}")
+            except Exception as e: 
+                st.error(f"Erro: {e}")
 
-# --- ABA 2: SISTEMA DE VENDAS (MELHORADA COM REPLICAÇÃO) ---
+# --- ABA 2: SISTEMA DE VENDAS ---
 elif aba == "💰 Vendas":
     st.title("💰 Consulta e Pré-Pedido")
     master_db = get_master_db()
@@ -174,7 +192,6 @@ elif aba == "💰 Vendas":
     
     with col_vendas_1:
         st.subheader("🔍 Busca e Adição Rápida")
-        # Placeholder necessário para o F1/F5 localizar o campo
         query = st.text_input("Pesquisar produto (ex: 'ref tang'):", placeholder="Digite e pressione Enter", key="search_query")
         desc_geral = st.number_input("Desconto Padrão na Tabela (%)", 0.0, 100.0, 0.0)
         
@@ -184,14 +201,12 @@ elif aba == "💰 Vendas":
             results = master_db[mask].head(20).copy() 
             
             if not results.empty:
-                # --- NOVO BLOCO: PERGUNTA DE REPLICAÇÃO ---
                 if st.session_state.replicar_data:
                     with st.container():
                         st.warning("🔄 **Replicação de Família Detectada**")
                         rep = st.session_state.replicar_data
                         st.write(f"Deseja replicar Qtd: {rep['qtd']} e Preço: R$ {rep['preco']} para itens da família '{rep['familia']}'?")
                         
-                        # Filtra itens da mesma família nos resultados da busca
                         familia_results = results[results['Description'].str.contains(rep['familia'], case=False) & (results['Barcode'] != rep['ean'])]
                         
                         escolha = st.radio("Como deseja replicar?", ["Replicar em todos os sabores encontrados", "Escolher sabores específicos"], horizontal=True)
@@ -237,7 +252,6 @@ elif aba == "💰 Vendas":
                                 "Preço Unit": p_sugestao,
                                 "Total": extra_round(p_sugestao * input_qtd)
                             })
-                            # Lógica para detectar família (ex: Refresco Tang)
                             palavras = row['Description'].split()
                             if len(palavras) >= 2:
                                 st.session_state.replicar_data = {
@@ -266,7 +280,6 @@ elif aba == "💰 Vendas":
                 st.session_state.carrinho = []
                 st.rerun()
 
-            # --- EXPORTAÇÃO EXCEL XLSX (MANTIDA) ---
             output_xlsx = io.BytesIO()
             wb_ped = openpyxl.Workbook()
             ws_ped = wb_ped.active
@@ -293,7 +306,7 @@ elif aba == "💰 Vendas":
         else:
             st.info("Carrinho vazio.")
 
-# --- ABA 3: GERENCIAR BANCO (MANTIDA INTEGRALMENTE) ---
+# --- ABA 3: GERENCIAR BANCO ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco")
     f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
@@ -306,7 +319,7 @@ elif aba == "⚙️ Gerenciar Banco":
         st.cache_data.clear()
         st.success("Banco Atualizado!")
 
-# --- ABA 4: USUÁRIOS (MANTIDA INTEGRALMENTE) ---
+# --- ABA 4: USUÁRIOS ---
 elif aba == "👤 Usuários":
     st.title("👤 Gestão de Usuários")
     users = load_users()
