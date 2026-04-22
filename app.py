@@ -110,13 +110,14 @@ tabs = ["📊 Cotação", "💰 Vendas", "⚙️ Gerenciar Banco"]
 if st.session_state.user_role == "admin": tabs.append("👤 Usuários")
 aba = st.sidebar.radio("Navegação", tabs)
 
-# --- ABA 1: COTAÇÃO (CORREÇÃO FILTRADA) ---
+# --- ABA 1: COTAÇÃO (CORREÇÃO DA CONTAGEM) ---
 if aba == "📊 Cotação":
     st.title("📊 Automatizador de Cotações")
     master_db = get_master_db()
+    if master_db.empty: st.warning("Banco vazio.")
     
     st.sidebar.header("Configurações")
-    modo = st.sidebar.selectbox("Regra de Busca:", ["Híbrido", "Apenas Barras", "Apenas Similaridade"])
+    modo = st.sidebar.selectbox("Regra de Busca:", ["Híbrido (Barras + Similaridade)", "Apenas Barras", "Apenas Similaridade"])
     discount = st.sidebar.number_input("Desconto (%)", 0.0)
     aplicar_arredondamento = st.sidebar.checkbox("Arredondar preços", value=True)
 
@@ -124,99 +125,192 @@ if aba == "📊 Cotação":
     if target_file:
         c1, c2 = st.columns(2)
         header_pos = c1.number_input("Linha do Cabeçalho:", 1, 100, 10)
-        start_row = c2.number_input("Linha de início:", 1, 1000, 11)
-        
+        start_row = c2.number_input("Linha de início dos produtos:", 1, 1000, 11)
         t_df_view = pd.read_excel(target_file, header=header_pos-1)
         col1, col2, col3 = st.columns(3)
         desc_col = col1.selectbox("Coluna Descrição", t_df_view.columns)
         bar_col = col2.selectbox("Coluna Barras", t_df_view.columns)
         price_col = col3.selectbox("Coluna Preço", t_df_view.columns)
 
-        if st.button("🚀 Processar"):
+        if st.button("🚀 Processar e Preservar Formatação"):
             price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
             target_file.seek(0)
             wb = openpyxl.load_workbook(target_file)
             ws = wb.active
             
-            # Mapear colunas
-            col_map = {str(ws.cell(row=header_pos, column=i).value).strip(): i for i in range(1, ws.max_column + 1)}
-            d_idx, b_idx, p_idx = col_map[desc_col], col_map[bar_col], col_map[price_col]
+            col_indices = {str(ws.cell(row=header_pos, column=i).value).strip(): i for i in range(1, ws.max_column + 1)}
             
-            # CONTAGEM REAL
-            contador_sucesso = 0
-
-            for r in range(int(start_row), ws.max_row + 1):
-                desc_val = ws.cell(row=r, column=d_idx).value
+            try:
+                d_idx = col_indices[desc_col.strip()]
+                b_idx = col_indices[bar_col.strip()]
+                p_idx = col_indices[price_col.strip()]
                 
-                # SE A DESCRIÇÃO ESTIVER TOTALMENTE VAZIA, PULA (IGNORA LINHAS FANTASMAS)
-                if desc_val is None or str(desc_val).strip() == "":
-                    continue
+                count = 0 # Reiniciando o contador
 
-                found_price = None
-                bar_val = ws.cell(row=r, column=b_idx).value
+                for r in range(int(start_row), ws.max_row + 1):
+                    d_val = ws.cell(row=r, column=d_idx).value
+                    # Se não tem descrição, ignoramos a linha (evita rodapés vazios)
+                    if not d_val or str(d_val).strip() == "":
+                        continue
+                    
+                    found_p = None
+                    b_val = ws.cell(row=r, column=b_idx).value
+                    
+                    # 1. Busca por Barras
+                    if "Barras" in modo or "Híbrido" in modo:
+                        barcodes = extract_all_barcodes(b_val)
+                        for b in barcodes:
+                            if b in price_map:
+                                found_p = price_map[b]
+                                break
+                    
+                    # 2. Busca por Similaridade
+                    if found_p is None and ("Similaridade" in modo or "Híbrido" in modo):
+                        best_sim = 0
+                        d_det = extrair_detalhes(d_val)
+                        for _, row_db in master_db.iterrows():
+                            sim = similarity(d_val, row_db['Description'])
+                            if sim >= 0.75 and d_det == extrair_detalhes(row_db['Description']):
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    found_p = row_db['Price']
+                    
+                    # 3. Gravação e incremento do contador REAL
+                    if found_p is not None:
+                        f_p = float(found_p) * (1 - (discount/100))
+                        valor_final = extra_round(f_p) if aplicar_arredondamento else f_p
+                        ws.cell(row=r, column=p_idx).value = valor_final
+                        count += 1 # SÓ INCREMENTA SE ACHOU O PREÇO
+
+                out = io.BytesIO()
+                wb.save(out)
+                st.success(f"Processamento concluído: {count} itens preenchidos com preços.")
+                st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
                 
-                # Busca
-                if "Barras" in modo or "Híbrido" in modo:
-                    eans = extract_all_barcodes(bar_val)
-                    for e in eans:
-                        if e in price_map:
-                            found_price = price_map[e]
-                            break
-                
-                if found_price is None and ("Similaridade" in modo or "Híbrido" in modo):
-                    best_sim = 0
-                    d_det = extrair_detalhes(desc_val)
-                    for _, db_row in master_db.iterrows():
-                        sim = similarity(desc_val, db_row['Description'])
-                        if sim >= 0.75 and d_det == extrair_detalhes(db_row['Description']):
-                            if sim > best_sim:
-                                best_sim = sim
-                                found_price = db_row['Price']
+            except Exception as e:
+                st.error(f"Erro: {e}")
 
-                # SÓ GRAVA E CONTA SE REALMENTE ENCONTROU O PREÇO
-                if found_price is not None:
-                    final_p = float(found_price) * (1 - (discount/100))
-                    ws.cell(row=r, column=p_idx).value = extra_round(final_p) if aplicar_arredondamento else final_p
-                    contador_sucesso += 1
-
-            out = io.BytesIO()
-            wb.save(out)
-            st.success(f"Feito! **{contador_sucesso}** itens foram atualizados.")
-            st.download_button("Baixar Resultado", out.getvalue(), "resultado.xlsx")
-
-# --- AS OUTRAS ABAS (VENDAS, BANCO, USUÁRIOS) FORAM MANTIDAS INTEGRALMENTE ---
+# --- ABA 2: VENDAS (MANTIDA INTEGRALMENTE) ---
 elif aba == "💰 Vendas":
     st.title("💰 Consulta e Pré-Pedido")
     master_db = get_master_db()
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        query = st.text_input("Pesquisar produto:", key="vendas_search")
+    col_vendas_1, col_vendas_2 = st.columns([3, 1])
+    
+    with col_vendas_1:
+        st.subheader("🔍 Busca e Adição Rápida")
+        query = st.text_input("Pesquisar produto:", placeholder="Digite e pressione Enter", key="search_query")
+        desc_geral = st.number_input("Desconto Padrão na Tabela (%)", 0.0, 100.0, 0.0)
+        
         if query:
-            terms = query.upper().split()
-            mask = master_db['Description'].apply(lambda x: all(t in str(x).upper() for t in terms))
-            results = master_db[mask].head(20)
-            for idx, row in results.iterrows():
-                with st.container():
-                    c1, c2, c3 = st.columns([3, 1, 1])
-                    c1.write(row['Description'])
-                    c2.write(f"R$ {row['Price']}")
-                    if c3.button("➕", key=f"add_{idx}"):
-                        st.session_state.carrinho.append({"item": row['Description'], "preco": row['Price']})
-                        st.rerun()
-    with col2:
-        st.subheader("🛒 Carrinho")
-        for i in st.session_state.carrinho:
-            st.write(f"- {i['item']}")
+            search_terms = query.replace('%', ' ').split()
+            mask = master_db['Description'].apply(lambda x: all(term.upper() in str(x).upper() for term in search_terms))
+            results = master_db[mask].head(20).copy() 
+            
+            if not results.empty:
+                if st.session_state.replicar_data:
+                    with st.container():
+                        st.warning("🔄 **Replicação de Família Detectada**")
+                        rep = st.session_state.replicar_data
+                        st.write(f"Deseja replicar Qtd: {rep['qtd']} e Preço: R$ {rep['preco']} para família '{rep['familia']}'?")
+                        familia_results = results[results['Description'].str.contains(rep['familia'], case=False) & (results['Barcode'] != rep['ean'])]
+                        escolha = st.radio("Como deseja replicar?", ["Replicar em todos", "Escolher específicos"], horizontal=True)
+                        
+                        if escolha == "Escolher específicos":
+                            selecionados = st.multiselect("Itens:", familia_results['Description'].tolist(), default=familia_results['Description'].tolist())
+                            if st.button("Confirmar Seleção"):
+                                for _, rf in familia_results.iterrows():
+                                    if rf['Description'] in selecionados:
+                                        st.session_state.carrinho.append({"Descrição": rf['Description'], "EAN": rf['Barcode'], "Qtd": rep['qtd'], "Preço Unit": rep['preco'], "Total": extra_round(rep['preco'] * rep['qtd'])})
+                                st.session_state.replicar_data = None
+                                st.rerun()
+                        else:
+                            if st.button("Confirmar em Todos"):
+                                for _, rf in familia_results.iterrows():
+                                    st.session_state.carrinho.append({"Descrição": rf['Description'], "EAN": rf['Barcode'], "Qtd": rep['qtd'], "Preço Unit": rep['preco'], "Total": extra_round(rep['preco'] * rep['qtd'])})
+                                st.session_state.replicar_data = None
+                                st.rerun()
+                
+                for idx, row in results.iterrows():
+                    p_sugestao = extra_round(float(row['Price']) * (1 - (desc_geral/100)))
+                    with st.container():
+                        c_desc, c_ean, c_preco, c_qtd, c_add = st.columns([3, 1.5, 1.2, 1, 0.5])
+                        c_desc.write(f"**{row['Description']}**")
+                        c_ean.write(f"`{row['Barcode']}`")
+                        c_preco.write(f"R$ {p_sugestao}")
+                        input_qtd = c_qtd.number_input("Qtd", 1, 1000, 1, key=f"qtd_{idx}")
+                        if c_add.button("➕", key=f"btn_{idx}"):
+                            st.session_state.carrinho.append({"Descrição": row['Description'], "EAN": row['Barcode'], "Qtd": input_qtd, "Preço Unit": p_sugestao, "Total": extra_round(p_sugestao * input_qtd)})
+                            palavras = row['Description'].split()
+                            if len(palavras) >= 2:
+                                st.session_state.replicar_data = {"familia": f"{palavras[0]} {palavras[1]}", "qtd": input_qtd, "preco": p_sugestao, "ean": row['Barcode']}
+                            st.rerun()
 
+    with col_vendas_2:
+        st.subheader("🛒 Seu Pedido")
+        if st.session_state.carrinho:
+            df_cart = pd.DataFrame(st.session_state.carrinho)
+            for item in st.session_state.carrinho:
+                st.write(f"{item['Qtd']}x {item['Descrição']} - **R$ {item['Total']}**")
+            total_pedido = df_cart['Total'].sum()
+            st.metric("Total Geral", f"R$ {extra_round(total_pedido)}")
+            if st.button("🗑️ Limpar Tudo"):
+                st.session_state.carrinho = []
+                st.rerun()
+            output_xlsx = io.BytesIO()
+            wb_ped = openpyxl.Workbook()
+            ws_ped = wb_ped.active
+            ws_ped.append(["Descrição", "Código EAN", "Qtd", "Preço Unit.", "Total"])
+            for item in st.session_state.carrinho:
+                ws_ped.append([item['Descrição'], item['EAN'], item['Qtd'], item['Preço Unit'], item['Total']])
+            wb_ped.save(output_xlsx)
+            st.download_button("📥 Baixar Pedido", output_xlsx.getvalue(), "pedido.xlsx")
+        else:
+            st.info("Carrinho vazio.")
+
+# --- ABA 3: GERENCIAR BANCO (MANTIDA INTEGRALMENTE) ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco")
     f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
-    if f and st.button("Salvar Banco"):
+    if f and st.button("💾 Salvar Banco"):
         df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
+        df = df.iloc[:, [0, 1, 2]]
+        df.columns = ['Description', 'Barcode', 'Price']
+        df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
         df.to_csv(DB_STORAGE, index=False)
+        st.cache_data.clear()
         st.success("Banco Atualizado!")
 
+# --- ABA 4: USUÁRIOS (MANTIDA INTEGRALMENTE) ---
 elif aba == "👤 Usuários":
-    st.title("👤 Usuários")
+    st.title("👤 Gestão de Usuários")
     users = load_users()
-    st.write(users)
+    c_b1, c_b2 = st.columns(2)
+    with c_b1:
+        df_u = pd.DataFrame.from_dict(users, orient='index').reset_index()
+        st.download_button("📥 Backup Usuários", df_u.to_csv(index=False).encode('utf-8'), "backup_users.csv")
+    with c_b2:
+        up_b = st.file_uploader("Restore Usuários", type=["csv"])
+        if up_b and st.button("🔥 Restaurar"):
+            df_r = pd.read_csv(up_b)
+            new_u = {str(r['index']): {"password": str(r['password']), "expiry": str(r['expiry']), "role": str(r['role'])} for _, r in df_r.iterrows()}
+            save_users(new_u); st.rerun()
+    st.divider()
+    col_n, col_e = st.columns(2)
+    with col_n:
+        st.subheader("➕ Novo")
+        with st.form("Novo"):
+            nu, np, nd = st.text_input("Usuário"), st.text_input("Senha"), st.number_input("Validade (dias)", 1, 365, 30)
+            if st.form_submit_button("Criar"):
+                users[nu] = {"password": np, "expiry": (datetime.now()+timedelta(days=nd)).strftime("%Y-%m-%d"), "role": "user"}
+                save_users(users); st.rerun()
+    with col_e:
+        st.subheader("📝 Editar")
+        u_sel = st.selectbox("Usuário", list(users.keys()))
+        if u_sel:
+            ep = st.text_input("Senha", value=users[u_sel]["password"])
+            ex = st.text_input("Expiração", value=users[u_sel]["expiry"])
+            if st.button("Salvar"):
+                users[u_sel].update({"password": ep, "expiry": ex})
+                save_users(users); st.rerun()
+            if u_sel != "admin" and st.button("❌ Excluir"):
+                del users[u_sel]; save_users(users); st.rerun()
