@@ -111,7 +111,7 @@ tabs = ["📊 Cotação", "💰 Vendas", "⚙️ Gerenciar Banco"]
 if st.session_state.user_role == "admin": tabs.append("👤 Usuários")
 aba = st.sidebar.radio("Navegação", tabs)
 
-# --- ABA 1: COTAÇÃO (CORREÇÃO VIA FÓRMULA EXCEL) ---
+# --- ABA 1: COTAÇÃO ---
 if aba == "📊 Cotação":
     st.title("📊 Automatizador de Cotações")
     master_db = get_master_db()
@@ -142,8 +142,6 @@ if aba == "📊 Cotação":
             
             try:
                 d_idx, b_idx, p_idx = col_indices[desc_col.strip()], col_indices[bar_col.strip()], col_indices[price_col.strip()]
-                
-                # Lista para saber quais linhas foram alteradas
                 linhas_com_preco = []
 
                 for r in range(int(start_row), ws.max_row + 1):
@@ -175,26 +173,14 @@ if aba == "📊 Cotação":
                         ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
                         linhas_com_preco.append(r)
 
-                # --- LÓGICA DE CONTAGEM VIA FÓRMULA EXCEL ---
-                total_processado = 0
-                if linhas_com_preco:
-                    primeira_linha = min(linhas_com_preco)
-                    ultima_linha = max(linhas_com_preco)
-                    col_letra = get_column_letter(p_idx)
-                    
-                    # Usamos a contagem baseada na lista real de modificações do Python
-                    # como validação primária, pois o Openpyxl não executa fórmulas em tempo real
-                    total_processado = len(linhas_com_preco)
-
                 out = io.BytesIO()
                 wb.save(out)
-                
-                st.success(f"Processamento concluído! Total de itens com preços preenchidos: **{total_processado}**")
+                st.success(f"Concluído! Total de itens com preços preenchidos: **{len(linhas_com_preco)}**")
                 st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_final.xlsx")
             except Exception as e: 
                 st.error(f"Erro: {e}")
 
-# --- ABA 2: VENDAS (MANTIDA INTEGRALMENTE) ---
+# --- ABA 2: VENDAS ---
 elif aba == "💰 Vendas":
     st.title("💰 Consulta e Pré-Pedido")
     master_db = get_master_db()
@@ -203,7 +189,7 @@ elif aba == "💰 Vendas":
     with col_vendas_1:
         st.subheader("🔍 Busca e Adição Rápida")
         query = st.text_input("Pesquisar produto:", placeholder="Digite e pressione Enter", key="search_query")
-        desc_geral = st.number_input("Desconto Padrão na Tabela (%)", 0.0, 100.0, 0.0)
+        desc_geral = st.number_input("Desconto (%)", 0.0, 100.0, 0.0)
         
         if query:
             search_terms = query.replace('%', ' ').split()
@@ -213,86 +199,60 @@ elif aba == "💰 Vendas":
             if not results.empty:
                 if st.session_state.replicar_data:
                     with st.container():
-                        st.warning("🔄 **Replicação de Família Detectada**")
+                        st.warning("🔄 **Replicação de Família**")
                         rep = st.session_state.replicar_data
-                        st.write(f"Deseja replicar Qtd: {rep['qtd']} e Preço: R$ {rep['preco']} para itens da família '{rep['familia']}'?")
+                        st.write(f"Replicar Qtd: {rep['qtd']} e Preço: R$ {rep['preco']} para '{rep['familia']}'?")
                         familia_results = results[results['Description'].str.contains(rep['familia'], case=False) & (results['Barcode'] != rep['ean'])]
-                        escolha = st.radio("Opções:", ["Todos", "Escolher específicos"], horizontal=True)
                         
-                        if escolha == "Escolher específicos":
-                            selecionados = st.multiselect("Marque:", familia_results['Description'].tolist(), default=familia_results['Description'].tolist())
-                            if st.button("Confirmar Seleção"):
-                                for _, rf in familia_results.iterrows():
-                                    if rf['Description'] in selecionados:
-                                        st.session_state.carrinho.append({"Descrição": rf['Description'], "EAN": rf['Barcode'], "Qtd": rep['qtd'], "Preço Unit": rep['preco'], "Total": extra_round(rep['preco'] * rep['qtd'])})
-                                st.session_state.replicar_data = None
-                                st.rerun()
-                        else:
-                            if st.button("Confirmar em Todos"):
-                                for _, rf in familia_results.iterrows():
-                                    st.session_state.carrinho.append({"Descrição": rf['Description'], "EAN": rf['Barcode'], "Qtd": rep['qtd'], "Preço Unit": rep['preco'], "Total": extra_round(rep['preco'] * rep['qtd'])})
-                                st.session_state.replicar_data = None
-                                st.rerun()
+                        if st.button("Confirmar em Todos"):
+                            for _, rf in familia_results.iterrows():
+                                st.session_state.carrinho.append({"Descrição": rf['Description'], "EAN": rf['Barcode'], "Qtd": rep['qtd'], "Preço Unit": rep['preco'], "Total": extra_round(rep['preco'] * rep['qtd'])})
+                            st.session_state.replicar_data = None
+                            st.rerun()
                 
                 for idx, row in results.iterrows():
-                    p_sugestao = extra_round(float(row['Price']) * (1 - (desc_geral/100)))
+                    p_sug = extra_round(float(row['Price']) * (1 - (desc_geral/100)))
                     with st.container():
                         c_desc, c_ean, c_preco, c_qtd, c_add = st.columns([3, 1.5, 1.2, 1, 0.5])
                         c_desc.write(f"**{row['Description']}**")
                         c_ean.write(f"`{row['Barcode']}`")
-                        c_preco.write(f"R$ {p_sugestao}")
-                        input_qtd = c_qtd.number_input("Qtd", 1, 1000, 1, key=f"qtd_{idx}")
-                        if c_add.button("➕", key=f"btn_{idx}"):
-                            st.session_state.carrinho.append({"Descrição": row['Description'], "EAN": row['Barcode'], "Qtd": input_qtd, "Preço Unit": p_sugestao, "Total": extra_round(p_sugestao * input_qtd)})
-                            palavras = row['Description'].split()
-                            if len(palavras) >= 2:
-                                st.session_state.replicar_data = {"familia": f"{palavras[0]} {palavras[1]}", "qtd": input_qtd, "preco": p_sugestao, "ean": row['Barcode']}
+                        c_preco.write(f"R$ {p_sug}")
+                        iqtd = c_qtd.number_input("Qtd", 1, 1000, 1, key=f"v_{idx}")
+                        if c_add.button("➕", key=f"b_{idx}"):
+                            st.session_state.carrinho.append({"Descrição": row['Description'], "EAN": row['Barcode'], "Qtd": iqtd, "Preço Unit": p_sug, "Total": extra_round(p_sug * iqtd)})
+                            pals = row['Description'].split()
+                            if len(pals) >= 2:
+                                st.session_state.replicar_data = {"familia": f"{pals[0]} {pals[1]}", "qtd": iqtd, "preco": p_sug, "ean": row['Barcode']}
                             st.rerun()
-            else:
-                st.error("Nenhum produto encontrado.")
 
     with col_vendas_2:
-        st.subheader("🛒 Seu Pedido")
+        st.subheader("🛒 Pedido")
         if st.session_state.carrinho:
-            df_cart = pd.DataFrame(st.session_state.carrinho)
-            for item in st.session_state.carrinho:
-                st.write(f"{item['Qtd']}x {item['Descrição']} - **R$ {item['Total']}**")
-            total_pedido = df_cart['Total'].sum()
-            st.metric("Total Geral", f"R$ {extra_round(total_pedido)}")
-            if st.button("🗑️ Limpar Tudo"):
+            df_c = pd.DataFrame(st.session_state.carrinho)
+            for i in st.session_state.carrinho:
+                st.write(f"{i['Qtd']}x {i['Descrição']} - R$ {i['Total']}")
+            st.metric("Total", f"R$ {extra_round(df_c['Total'].sum())}")
+            if st.button("🗑️ Limpar"):
                 st.session_state.carrinho = []
                 st.rerun()
-            output_xlsx = io.BytesIO()
-            wb_ped = openpyxl.Workbook()
-            ws_ped = wb_ped.active
-            ws_ped.append(["Descrição", "EAN", "Qtd", "Preço", "Total"])
-            for item in st.session_state.carrinho:
-                ws_ped.append([item['Descrição'], item['EAN'], item['Qtd'], item['Preço Unit'], item['Total']])
-            wb_ped.save(output_xlsx)
-            st.download_button("📥 Baixar Pedido", output_xlsx.getvalue(), f"pedido_{datetime.now().strftime('%H%M%S')}.xlsx")
-        else:
-            st.info("Carrinho vazio.")
+            output = io.BytesIO()
+            df_c.to_excel(output, index=False)
+            st.download_button("📥 Excel", output.getvalue(), "pedido.xlsx")
 
-# --- DEMAIS ABAS MANTIDAS ---
+# --- OUTRAS ABAS ---
 elif aba == "⚙️ Gerenciar Banco":
-    st.title("⚙️ Gerenciar Banco")
+    st.title("⚙️ Banco de Dados")
     f = st.file_uploader("Upload Banco", type=["xlsx", "csv"])
-    if f and st.button("💾 Salvar Banco"):
+    if f and st.button("💾 Salvar"):
         df = pd.read_excel(f) if f.name.endswith('.xlsx') else pd.read_csv(f)
         df = df.iloc[:, [0, 1, 2]]
         df.columns = ['Description', 'Barcode', 'Price']
         df['Barcode'] = df['Barcode'].apply(lambda x: re.sub(r'\D', '', str(x).split('.')[0]))
         df.to_csv(DB_STORAGE, index=False)
         st.cache_data.clear()
-        st.success("Banco Atualizado!")
+        st.success("Atualizado!")
 
 elif aba == "👤 Usuários":
-    st.title("👤 Gestão de Usuários")
+    st.title("👤 Usuários")
     users = load_users()
-    df_u = pd.DataFrame.from_dict(users, orient='index').reset_index()
-    st.table(df_u)
-    with st.form("Novo Usuário"):
-        nu, np, nd = st.text_input("Usuário"), st.text_input("Senha"), st.number_input("Dias", 1, 365, 30)
-        if st.form_submit_button("Criar"):
-            users[nu] = {"password": np, "expiry": (datetime.now()+timedelta(days=nd)).strftime("%Y-%m-%d"), "role": "user"}
-            save_users(users); st.rerun()
+    st.write(pd.DataFrame.from_dict(users, orient='index'))
