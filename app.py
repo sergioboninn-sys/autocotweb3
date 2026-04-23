@@ -121,6 +121,14 @@ if aba == "📊 Cotação":
     discount = st.sidebar.number_input("Desconto (%)", 0.0)
     aplicar_arredondamento = st.sidebar.checkbox("Arredondar preços", value=True)
 
+    # --- NOVA FUNCIONALIDADE: OPÇÃO DE SALVAMENTO ---
+    st.sidebar.subheader("Opções de Download")
+    opcao_salvamento = st.sidebar.radio(
+        "Como deseja baixar o resultado?",
+        ["Novo Arquivo (cotacao_corrigida.xlsx)", "Mesmo nome do arquivo original"],
+        help="Esta opção define apenas o nome do arquivo baixado. A formatação original será mantida em ambos os casos."
+    )
+
     target_file = st.file_uploader("Planilha de Destino", type=["xlsx"])
     if target_file:
         c1, c2 = st.columns(2)
@@ -134,6 +142,13 @@ if aba == "📊 Cotação":
 
         if st.button("🚀 Processar e Preservar Formatação"):
             price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
+            
+            # Definir nome do arquivo de saída
+            if opcao_salvamento == "Mesmo nome do arquivo original":
+                output_name = target_file.name
+            else:
+                output_name = "cotacao_corrigida.xlsx"
+
             target_file.seek(0)
             wb = openpyxl.load_workbook(target_file)
             ws = wb.active
@@ -175,7 +190,7 @@ if aba == "📊 Cotação":
                         f_p = float(found_p) * (1 - (discount/100))
                         ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
 
-                # CONTAGEM CORRIGIDA: Contar apenas células com valor > 0 na coluna de preço
+                # CONTAGEM CORRIGIDA
                 contador_final = 0
                 for r in range(int(start_row), ws.max_row + 1):
                     celula_preco = ws.cell(row=r, column=p_idx).value
@@ -188,12 +203,12 @@ if aba == "📊 Cotação":
                 out = io.BytesIO()
                 wb.save(out)
                 st.success(f"Sucesso! Foram preenchidos **{contador_final}** itens com preços.")
-                st.download_button("📥 Baixar Planilha", out.getvalue(), "cotacao_corrigida.xlsx")
+                st.download_button(f"📥 Baixar Planilha ({output_name})", out.getvalue(), output_name)
                 
             except Exception as e:
                 st.error(f"Erro ao processar: {e}")
 
-# --- ABA 2: VENDAS (ORIGINAL INTEGRAL) ---
+# --- AS DEMAIS ABAS PERMANECEM IGUAIS AO ORIGINAL ENVIADO ---
 elif aba == "💰 Vendas":
     st.title("💰 Consulta e Pré-Pedido")
     master_db = get_master_db()
@@ -270,7 +285,6 @@ elif aba == "💰 Vendas":
         else:
             st.info("Carrinho vazio.")
 
-# --- ABA 3: GERENCIAR BANCO (ORIGINAL) ---
 elif aba == "⚙️ Gerenciar Banco":
     st.title("⚙️ Gerenciar Banco")
     f = st.file_uploader("Upload Banco (xlsx/csv)", type=["xlsx", "csv"])
@@ -283,7 +297,6 @@ elif aba == "⚙️ Gerenciar Banco":
         st.cache_data.clear()
         st.success("Banco Atualizado com Sucesso!")
 
-# --- ABA 4: USUÁRIOS (ORIGINAL) ---
 elif aba == "👤 Usuários":
     st.title("👤 Gestão de Usuários")
     users = load_users()
