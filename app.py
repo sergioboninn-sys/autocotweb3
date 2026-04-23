@@ -90,6 +90,12 @@ def extract_all_barcodes(val):
     text = str(val).split('.')[0]
     return re.findall(r'\d{8,14}', text)
 
+# NOVA FUNÇÃO DE APOIO
+def clean_barcode_prefix(barcode):
+    if len(barcode) > 8 and (barcode.startswith('0') or barcode.startswith('1')):
+        return barcode[1:]
+    return barcode
+
 def similarity(a, b):
     return SequenceMatcher(None, str(a).upper().strip(), str(b).upper().strip()).ratio()
 
@@ -118,10 +124,13 @@ if aba == "📊 Cotação":
     
     st.sidebar.header("Configurações")
     modo = st.sidebar.selectbox("Regra de Busca:", ["Híbrido (Barras + Similaridade)", "Apenas Barras", "Apenas Similaridade"])
+    
+    # NOVA OPÇÃO NA BARRA LATERAL
+    ignorar_01 = st.sidebar.checkbox("Ignorar 0 ou 1 à esquerda no EAN", value=False)
+    
     discount = st.sidebar.number_input("Desconto (%)", 0.0)
     aplicar_arredondamento = st.sidebar.checkbox("Arredondar preços", value=True)
 
-    # --- NOVA FUNCIONALIDADE: OPÇÃO DE SALVAMENTO ---
     st.sidebar.subheader("Opções de Download")
     opcao_salvamento = st.sidebar.radio(
         "Como deseja baixar o resultado?",
@@ -143,7 +152,6 @@ if aba == "📊 Cotação":
         if st.button("🚀 Processar e Preservar Formatação"):
             price_map = dict(zip(master_db['Barcode'].astype(str), master_db['Price']))
             
-            # Definir nome do arquivo de saída
             if opcao_salvamento == "Mesmo nome do arquivo original":
                 output_name = target_file.name
             else:
@@ -167,13 +175,18 @@ if aba == "📊 Cotação":
                     found_p = None
                     b_val = ws.cell(row=r, column=b_idx).value
                     
-                    # 1. Busca por Barras
+                    # 1. Busca por Barras (MODIFICADO APENAS AQUI)
                     if "Barras" in modo or "Híbrido" in modo:
                         barcodes = extract_all_barcodes(b_val)
                         for b in barcodes:
                             if b in price_map:
                                 found_p = price_map[b]
                                 break
+                            elif ignorar_01:
+                                b_limpo = clean_barcode_prefix(b)
+                                if b_limpo in price_map:
+                                    found_p = price_map[b_limpo]
+                                    break
                     
                     # 2. Busca por Similaridade
                     if found_p is None and ("Similaridade" in modo or "Híbrido" in modo):
@@ -190,15 +203,13 @@ if aba == "📊 Cotação":
                         f_p = float(found_p) * (1 - (discount/100))
                         ws.cell(row=r, column=p_idx).value = extra_round(f_p) if aplicar_arredondamento else f_p
 
-                # CONTAGEM CORRIGIDA
                 contador_final = 0
                 for r in range(int(start_row), ws.max_row + 1):
                     celula_preco = ws.cell(row=r, column=p_idx).value
                     try:
                         if celula_preco is not None and float(celula_preco) > 0:
                             contador_final += 1
-                    except:
-                        continue
+                    except: continue
 
                 out = io.BytesIO()
                 wb.save(out)
@@ -208,7 +219,7 @@ if aba == "📊 Cotação":
             except Exception as e:
                 st.error(f"Erro ao processar: {e}")
 
-# --- AS DEMAIS ABAS PERMANECEM IGUAIS AO ORIGINAL ENVIADO ---
+# AS DEMAIS ABAS PERMANECEM EXATAMENTE IGUAIS
 elif aba == "💰 Vendas":
     st.title("💰 Consulta e Pré-Pedido")
     master_db = get_master_db()
